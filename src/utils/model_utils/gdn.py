@@ -26,7 +26,7 @@ class GDNNet(nn.Module):
     def adjacency(self):
         v = F.normalize(self.emb, dim=1)
         sim = v @ v.t()
-        sim.fill_diagonal_(-2.0)
+        sim.fill_diagonal_(-float("inf"))
         idx = sim.topk(self.k, dim=1).indices
         mask = torch.zeros(self.n, self.n, dtype=torch.bool, device=self.emb.device)
         mask.scatter_(1, idx, True)

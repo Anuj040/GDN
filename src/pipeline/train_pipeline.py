@@ -7,7 +7,8 @@ import torch.nn.functional as F
 
 from src.utils.data_utils.prepare_data import get_df, unit_array
 from src.utils.data_utils.prepare_dataset import Scaler, build_eval
-from src.utils.eval_utils.metrics import add_result, eval_scores, lead_time
+from src.utils.eval_utils.metrics import (add_result, eval_scores, lead_time,
+                                          make_plots)
 from src.utils.model_utils.aux_methods import MTMethod, SigmaRule, StaticPCA
 from src.utils.model_utils.gdn import GDNNet
 from src.utils.preprocess_utils.make_samples import make_windows
@@ -36,7 +37,6 @@ class GDNAnomaly:
         lr=1e-3,
         batch=128,
         smooth=3,
-        seed=SEED,
         verbose=False,
     ):
         self.p = dict(
@@ -48,7 +48,6 @@ class GDNAnomaly:
             lr=lr,
             batch=batch,
             smooth=smooth,
-            seed=seed,
             verbose=verbose,
         )
 
@@ -56,11 +55,11 @@ class GDNAnomaly:
         df = get_df()
         units_all = sorted(df["unit"].unique())
         print("engines:", len(units_all), " rows:", len(df))
-        torch.manual_seed(self.p["seed"])
+        torch.manual_seed(SEED)
         rng = np.random.default_rng(SEED)
         ids = np.array(units_all)
         rng.shuffle(ids)
-        train_ids, eval_ids = ids[:70], ids[70:]
+        train_ids, self.eval_ids = ids[:70], ids[70:]
 
         raw_train_healthy = [unit_array(u, df)[:HEALTHY_CYCLES] for u in train_ids]
         sc = Scaler().fit(np.vstack(raw_train_healthy))
@@ -68,7 +67,7 @@ class GDNAnomaly:
         n_val = 14  # 健全データの2割を検証(較正)用に
         self.tr_units = [sc.transform(x) for x in raw_train_healthy[:-n_val]]
         self.va_units = [sc.transform(x) for x in raw_train_healthy[-n_val:]]
-        raw_eval = [unit_array(u, df) for u in eval_ids]
+        raw_eval = [unit_array(u, df) for u in self.eval_ids]
         self.ev_units, self.ev_labels, self.ev_masks, self.ev_fails = build_eval(
             raw_eval, sc
         )
@@ -217,6 +216,7 @@ class GDNAnomaly:
                     f"[{dataset}/{experiment}] {m.name:22s} "
                     + " ".join(f"{k}={v:.3f}" for k, v in met.items() if v == v)
                 )
+                make_plots(models, out_scores, self.ev_labels, self.eval_ids, "k5")
 
 
 if __name__ == "__main__":
