@@ -11,7 +11,7 @@ import math
 class GraphLayer(MessagePassing):
     def __init__(self, in_channels, out_channels, heads=1, concat=True,
                  negative_slope=0.2, dropout=0, bias=True, inter_dim=-1,**kwargs):
-        super(GraphLayer, self).__init__(aggr='add', **kwargs)
+        super(GraphLayer, self).__init__(aggr='add', node_dim=0, **kwargs)
 
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -107,7 +107,7 @@ class GraphLayer(MessagePassing):
 
 
         alpha = F.leaky_relu(alpha, self.negative_slope)
-        alpha = softmax(alpha, edge_index_i, size_i)
+        alpha = softmax(alpha, edge_index_i, num_nodes=size_i)
 
         if return_attention_weights:
             self.__alpha__ = alpha
