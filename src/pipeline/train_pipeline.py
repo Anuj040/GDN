@@ -34,10 +34,14 @@ class GDNAnomaly:
         emb_dim=64,
         hidden=128,
         epochs=25,
-        lr=1e-3,
+        lr=1e-2,
         batch=128,
         smooth=3,
-        verbose=False,
+        graph_mode="hard",
+        tau=1.0,
+        tau_min=None,
+        gumbel_hard=False,
+        verbose=True,
     ):
         self.p = dict(
             window=window,
@@ -48,8 +52,25 @@ class GDNAnomaly:
             lr=lr,
             batch=batch,
             smooth=smooth,
+            graph_mode=graph_mode,
+            tau=tau,
+            tau_min=tau_min,  # None -> constant tau; else anneal tau -> tau_min
+            gumbel_hard=gumbel_hard,
             verbose=verbose,
         )
+
+    def _tau_at(self, ep: int) -> float:
+        """Gumbel-Softmax temperature for epoch ``ep`` (0-indexed).
+
+        Geometric anneal from ``tau`` (ep 0) down to ``tau_min`` (last epoch),
+        following Jang et al. (2017). Returns constant ``tau`` when ``tau_min``
+        is unset or a single-epoch run is requested.
+        """
+        tau0, tau_min, epochs = self.p["tau"], self.p["tau_min"], self.p["epochs"]
+        if tau_min is None or epochs <= 1:
+            return tau0
+        frac = ep / (epochs - 1)  # 0.0 -> 1.0 across training
+        return tau0 * (tau_min / tau0) ** frac
 
     def prepare_dataset(self) -> tuple[torch.Tensor, torch.Tensor]:
         df = get_df()
@@ -103,6 +124,9 @@ class GDNAnomaly:
             self.p["emb_dim"],
             self.p["hidden"],
             self.p["topk"],
+            graph_mode=self.p["graph_mode"],
+            tau=self.p["tau"],
+            gumbel_hard=self.p["gumbel_hard"],
         ).to(DEVICE)
 
     def _windows_of(self, units):
@@ -123,6 +147,7 @@ class GDNAnomaly:
         )
         best, best_state = np.inf, None
         for ep in range(self.p["epochs"]):
+            self.model.tau = self._tau_at(ep)  # anneal Gumbel temperature
             self.model.train()
             for xb, yb in self.dl:
                 xb, yb = xb.to(DEVICE), yb.to(DEVICE)
@@ -138,8 +163,8 @@ class GDNAnomaly:
                 best_state = {
                     k: v.detach().clone() for k, v in self.model.state_dict().items()
                 }
-            if self.p["verbose"]:
-                print(f"  epoch {ep+1:02d} val_mse={vl:.4f}")
+            if self.p["verbose"] and (ep + 1) % 5 == 0:
+                print(f"  epoch {ep+1:02d} val_mse={vl:.4f} tau={self.model.tau:.3f}")
         self.model.load_state_dict(best_state)
         # 検証誤差で正規化係数 (median / IQR) を較正
         with torch.no_grad():
@@ -216,7 +241,9 @@ class GDNAnomaly:
                     f"[{dataset}/{experiment}] {m.name:22s} "
                     + " ".join(f"{k}={v:.3f}" for k, v in met.items() if v == v)
                 )
-                make_plots(models, out_scores, self.ev_labels, self.eval_ids, "k5")
+                make_plots(
+                    models, out_scores, self.ev_labels, self.eval_ids, "5gmblnoslf_lr10"
+                )
 
 
 if __name__ == "__main__":
