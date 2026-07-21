@@ -38,6 +38,7 @@ class GDNNet(nn.Module):
         self.out = nn.Sequential(
             nn.Linear(emb_dim, hidden), nn.ReLU(), nn.Linear(hidden, 1)
         )
+        self.skip_self_adjacency = True
 
     def adjacency(self):
         """Return an (N, N) adjacency weight matrix A used to gate attention.
@@ -59,7 +60,10 @@ class GDNNet(nn.Module):
             idx = s.topk(self.k, dim=1).indices
             hard = torch.zeros_like(sim)
             hard.scatter_(1, idx, 1.0)
-            return (hard).detach()  # self-loop; non-differentiable graph
+            if not self.skip_self_adjacency:
+                hard = hard + eye  # self-loop
+
+            return hard.detach() # non-differentiable graph
 
         # Gumbel-perturbed top-k (differentiable via straight-through).
         u = torch.rand_like(sim).clamp_(1e-9, 1.0)
@@ -74,7 +78,9 @@ class GDNNet(nn.Module):
         # Straight-through: forward value is the sparse k-hot graph, backward
         # gradient is that of the dense softmax.
         mask = (hard + soft_k - soft_k.detach()) if self.gumbel_hard else soft_k
-        return mask + eye  # self-loop
+        if not self.skip_self_adjacency:
+            mask = mask + eye  # self-loop
+        return mask
 
     def forward(self, x):  # x: (B, N, w)
         B = x.size(0)

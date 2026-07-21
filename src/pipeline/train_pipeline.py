@@ -37,10 +37,10 @@ class GDNAnomaly:
         lr=1e-2,
         batch=128,
         smooth=3,
-        graph_mode="hard",
+        graph_mode="gumbel",
         tau=1.0,
-        tau_min=None,
-        gumbel_hard=False,
+        tau_min=0.1,
+        gumbel_hard=True,
         verbose=True,
     ):
         self.p = dict(
