@@ -1,11 +1,14 @@
+import argparse
+import os
 import random
 import warnings
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn.functional as F
 
-from src.utils.data_utils.prepare_data import get_df, unit_array
+from src.utils.data_utils.prepare_data import SENSORS, get_df, unit_array
 from src.utils.data_utils.prepare_dataset import Scaler, build_eval
 from src.utils.eval_utils.metrics import (add_result, eval_scores, lead_time,
                                           make_plots)
@@ -42,7 +45,9 @@ class GDNAnomaly:
         tau_min=0.1,
         gumbel_hard=True,
         verbose=True,
+        dataset="cmapss",
     ):
+        self.dataset = dataset
         self.p = dict(
             window=window,
             topk=topk,
@@ -72,7 +77,8 @@ class GDNAnomaly:
         frac = ep / (epochs - 1)  # 0.0 -> 1.0 across training
         return tau0 * (tau_min / tau0) ** frac
 
-    def prepare_dataset(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def _load_cmapss(self) -> None:
+        """CMAPSS: multi-engine run-to-failure; train on healthy prefixes."""
         df = get_df()
         units_all = sorted(df["unit"].unique())
         print("engines:", len(units_all), " rows:", len(df))
@@ -92,6 +98,56 @@ class GDNAnomaly:
         self.ev_units, self.ev_labels, self.ev_masks, self.ev_fails = build_eval(
             raw_eval, sc
         )
+        self.feature_names = SENSORS
+
+    def _load_msl(self, val_ratio: float = 0.2) -> None:
+        """MSL: single continuous series. ``train.csv`` is all-normal, ``test.csv``
+        carries per-timestep anomaly labels in its ``attack`` column.
+
+        Data prep is kept aligned with the *original* GDN pipeline for an
+        apples-to-apples benchmark: features are ordered by ``list.txt`` (the
+        original ``feature_map``) and used raw — the MSL csv is already
+        normalised, and the original applies no further scaling. A tail slice of
+        the all-normal training series is held out for validation.
+        """
+        base = os.path.join("data", "msl")
+        train = pd.read_csv(os.path.join(base, "train.csv"), index_col=0)
+        test = pd.read_csv(os.path.join(base, "test.csv"), index_col=0)
+
+        labels = (
+            test["attack"].to_numpy().astype(int)
+            if "attack" in test.columns
+            else np.zeros(len(test), dtype=int)
+        )
+        with open(os.path.join(base, "list.txt")) as f:
+            feats = [ln.strip() for ln in f if ln.strip()]
+        self.feature_names = feats
+
+        Xtr_raw = train[feats].to_numpy(dtype=np.float32)
+        Xte_raw = test[feats].to_numpy(dtype=np.float32)
+        print(
+            "features:",
+            len(feats),
+            " train rows:",
+            len(Xtr_raw),
+            " test rows:",
+            len(Xte_raw),
+        )
+
+        # hold out the tail of the all-normal training series for validation,
+        # keeping at least one window's worth of points on each side
+        n_val = max(self.p["window"] + 1, int(len(Xtr_raw) * val_ratio))
+        self.tr_units = [Xtr_raw[:-n_val]]
+        self.va_units = [Xtr_raw[-n_val:]]
+        self.ev_units = [Xte_raw]
+        self.ev_labels = [labels]
+        self.eval_ids = ["msl-test"]
+
+    def prepare_dataset(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.dataset == "msl":
+            self._load_msl()
+        else:
+            self._load_cmapss()
 
         print(
             "train units:",
@@ -201,7 +257,8 @@ class GDNAnomaly:
     def run_benchmark(self):
         thr_q = 0.99
         persist = 5
-        dataset, experiment = "CMAPSS-FD001", "main"
+        dataset = "MSL" if self.dataset == "msl" else "CMAPSS-FD001"
+        experiment = "main"
         methods = ("gdn", "mt", "sigma", "pca")
 
         Xtr = np.vstack(self.tr_units)
@@ -242,11 +299,82 @@ class GDNAnomaly:
                     + " ".join(f"{k}={v:.3f}" for k, v in met.items() if v == v)
                 )
                 make_plots(
-                    models, out_scores, self.ev_labels, self.eval_ids, "5gmblnoslf_lr10"
+                    models,
+                    out_scores,
+                    self.ev_labels,
+                    self.eval_ids,
+                    f"{dataset}_5gmblnoslf_lr10",
+                    feature_names=self.feature_names,
+                    title_prefix=f"{dataset} eval",
                 )
+
+    def _predict_series(self, X):
+        """Next-step predictions of the trained GDNNet over a full series ``X``.
+
+        Returns ``(pred, gt)`` each shaped (T-window, N), aligned to the windows
+        produced by :func:`make_windows` (stride 1) — the format the original
+        ``evaluate`` helpers expect per feature.
+        """
+        xs, ys = make_windows(X, self.p["window"])
+        self.model.eval()
+        preds = []
+        with torch.no_grad():
+            for i in range(0, len(xs), 1024):
+                xb = torch.tensor(xs[i : i + 1024], device=DEVICE)
+                preds.append(self.model(xb).cpu().numpy())
+        return np.concatenate(preds), ys
+
+    def run_benchmark_msl(self):
+        """Evaluate GDNNet on MSL with the *original* GDN metrics.
+
+        Builds ``test_result`` / ``val_result`` in the original ``[predicted,
+        ground, labels]`` layout and defers to the repo-root ``evaluate`` module,
+        so the reported F1 / precision / recall / AUC are computed identically to
+        ``sh run.sh cpu msl`` — the only difference is the model. Kept separate
+        from the CMAPSS ``run_benchmark`` and selected via ``--dataset msl``.
+        """
+        from evaluate import get_best_performance_data, get_full_err_scores
+
+        w = self.p["window"]
+        pred_te, gt_te = self._predict_series(self.ev_units[0])
+        pred_va, gt_va = self._predict_series(self.va_units[0])
+        lab_te = np.asarray(self.ev_labels[0])[w:]  # label at each predicted step
+
+        n_feat = pred_te.shape[1]
+        lab_te_mat = np.repeat(lab_te[:, None], n_feat, axis=1)
+        lab_va_mat = np.zeros_like(pred_va)  # validation series is all-normal
+
+        test_result = [pred_te.tolist(), gt_te.tolist(), lab_te_mat.tolist()]
+        val_result = [pred_va.tolist(), gt_va.tolist(), lab_va_mat.tolist()]
+
+        test_scores, normal_scores = get_full_err_scores(test_result, val_result)
+        test_labels = np.array(test_result)[2, :, 0].tolist()
+        f1, pre, rec, auc, thr = get_best_performance_data(
+            test_scores, test_labels, topk=1
+        )
+        print(
+            "=========================** Result (MSL / GDNNet) **============================\n"
+        )
+        print(f"F1 score: {f1}")
+        print(f"precision: {pre}")
+        print(f"recall: {rec}")
+        print(f"AUC: {auc}\n")
+        return dict(F1=f1, precision=pre, recall=rec, AUC=auc)
 
 
 if __name__ == "__main__":
-    trainer = GDNAnomaly()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dataset",
+        default="cmapss",
+        choices=["cmapss", "msl"],
+        help="cmapss (default, unchanged) or msl",
+    )
+    args = parser.parse_args()
+
+    trainer = GDNAnomaly(dataset=args.dataset)
     trainer.fit()
-    trainer.run_benchmark()
+    if args.dataset == "msl":
+        trainer.run_benchmark_msl()
+    else:
+        trainer.run_benchmark()

@@ -28,7 +28,7 @@ def train(model = None, save_path = '', config={},  train_dataloader=None, val_d
 
     seed = config['seed']
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=config['decay'])
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01, weight_decay=config['decay'])
 
     now = time.time()
     
@@ -80,10 +80,11 @@ def train(model = None, save_path = '', config={},  train_dataloader=None, val_d
 
 
         # each epoch
-        print('epoch ({} / {}) (Loss:{:.8f}, ACU_loss:{:.8f})'.format(
-                        i_epoch, epoch, 
-                        acu_loss/len(dataloader), acu_loss), flush=True
-            )
+        if (i_epoch + 1) % 5 == 0:
+            print('epoch ({} / {}) (Loss:{:.8f}, ACU_loss:{:.8f})'.format(
+                            i_epoch, epoch, 
+                            acu_loss/len(dataloader), acu_loss), flush=True
+                )
 
         # use val dataset to judge
         if val_dataloader is not None:

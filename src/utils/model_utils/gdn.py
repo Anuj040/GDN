@@ -63,7 +63,7 @@ class GDNNet(nn.Module):
             if not self.skip_self_adjacency:
                 hard = hard + eye  # self-loop
 
-            return hard.detach() # non-differentiable graph
+            return hard.detach()  # non-differentiable graph
 
         # Gumbel-perturbed top-k (differentiable via straight-through).
         u = torch.rand_like(sim).clamp_(1e-9, 1.0)

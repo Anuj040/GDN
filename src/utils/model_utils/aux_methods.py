@@ -14,6 +14,11 @@ class MTMethod:
         Z = (X - self.mu) / self.sd
         R = np.corrcoef(Z, rowvar=False)
         R = np.atleast_2d(R)
+        # near-constant channels (e.g. some MSL sensors) yield NaN correlations;
+        # fall back to an identity-like structure so pinv stays well-defined.
+        if not np.isfinite(R).all():
+            R = np.nan_to_num(R, nan=0.0, posinf=0.0, neginf=0.0)
+            np.fill_diagonal(R, 1.0)
         self.Rinv = np.linalg.pinv(R)
         self.k = X.shape[1]
         return self

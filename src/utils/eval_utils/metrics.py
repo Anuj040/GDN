@@ -85,14 +85,23 @@ def plot_unit(scores_by_method, unit_idx, label, title="", filename: str = ""):
     plt.savefig(os.path.join("outputs", "figs", f"{filename}_score.png"))
 
 
-def make_plots(models, out_scores, ev_labels, eval_ids, filename: str):
+def make_plots(
+    models,
+    out_scores,
+    ev_labels,
+    eval_ids,
+    filename: str,
+    feature_names=None,
+    title_prefix: str = "CMAPSS eval engine",
+):
     # 例: 1機のスコア推移 (終盤に向けた緩やかな上昇を各手法が捉えられるか)
+    feature_names = SENSORS if feature_names is None else feature_names
     os.makedirs(os.path.join("outputs", "figs"), exist_ok=True)
     plot_unit(
         out_scores,
         0,
         ev_labels[0],
-        f"CMAPSS eval engine {eval_ids[0]}",
+        f"{title_prefix} {eval_ids[0]}",
         filename=filename,
     )
 
@@ -100,8 +109,8 @@ def make_plots(models, out_scores, ev_labels, eval_ids, filename: str):
     simmat, adj = models["gdn"].learned_graph()
     plt.figure(figsize=(4.5, 4))
     plt.imshow(simmat, cmap="coolwarm", vmin=-1, vmax=1)
-    plt.xticks(range(len(SENSORS)), SENSORS, rotation=90, fontsize=7)
-    plt.yticks(range(len(SENSORS)), SENSORS, fontsize=7)
+    plt.xticks(range(len(feature_names)), feature_names, rotation=90, fontsize=7)
+    plt.yticks(range(len(feature_names)), feature_names, fontsize=7)
     plt.title("GDN学習済みセンサ埋め込みのcos類似度")
     plt.colorbar()
     plt.tight_layout()
